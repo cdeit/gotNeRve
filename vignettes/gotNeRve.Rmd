@@ -31,7 +31,7 @@ _Non-muscle-invasive bladder cancer molecular subtypes predict differential resp
 ## Installation
 
 ```{r github}
-# devtools::install_github("cdeits/gotNeRve")
+# devtools::install_github("cdeit/gotNeRve")
 ```
 
 ## Setup
