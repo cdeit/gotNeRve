@@ -1,0 +1,7 @@
+^LICENSE\.md$
+^data-raw$
+^og_shiny$
+^results$
+^\.claude$
+^Rplots\.pdf$
+^\.DS_Store$

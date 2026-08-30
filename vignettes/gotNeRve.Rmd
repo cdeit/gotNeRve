@@ -1,0 +1,767 @@
+---
+title: "Reproducing the gotNeRve model"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Reproducing the gotNeRve model}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 7, fig.height = 5)
+```
+
+## Introduction
+
+`gotNeRve` is a gene expression-based classifier for predicting high or low **s**tromal **t**umor-**a**ssociated **n**erve (**STaN**) abundance in non-muscle-invasive bladder cancer (NMIBC). The classifier uses a 12-gene transcriptomic signature and can be applied to individual samples or larger cohorts.
+
+This R Markdown document reproduces the results from the original publication step-by-step, including the development and evaluation of the STaN classifier, feature selection, model tuning, and validation in an independent test cohort. It also demonstrates the prognostic relevance of model predictions in an internal-unseen cohort and provides examples for applying the trained `gotNeRve` model to new gene expression data.
+
+
+## Citations
+
+If you use ```gotNeRve``` or the associated gene expression data (originally obtained from ```BRSpred```), please use the following citations:
+
+  1.    Deiter CS, de Jong FC, Olislagers M, Jordan KR, Zuiverloon TCM, Costello JC.
+_Stromal innervation is prognostic in non-muscle-invasive bladder cancer and predicted by a distinct microenvironmental transcriptomic signature._ bioRxiv. 2026 September. doi: []()
+
+  2.    de Jong FC, Laajala TD, Hoedemaeker RF, Jordan KR, van der Made ACJ, Boevé ER, van der Schoot DKE, Nieuwkamer B, Janssen EAM, Mahmoudi T, Boormans JL, Theodorescu D, Costello JC, Zuiverloon TCM. 
+_Non-muscle-invasive bladder cancer molecular subtypes predict differential response to intravesical Bacillus Calmette-Guérin._ Sci Transl Med. 2023 May 24;15(697):eabn4118. doi: [10.1126/scitranslmed.abn4118](https://doi.org/10.1126/scitranslmed.abn4118)
+
+## Installation
+
+```{r github}
+# devtools::install_github("cdeits/gotNeRve")
+```
+
+## Setup
+
+```{r setup, message = FALSE}
+library(gotNeRve)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(cowplot)
+library(glmnet)
+library(caret)
+library(pROC)
+library(survival)
+library(survminer)
+```
+
+
+## 1. Datasets
+
+Load gene expression matrices containing log2-transformed counts per million (CPM; without TMM normalization) for the training (`train_log2cpm`), independent test (`test_log2cpm`), and internal-unseen (`unseen_log2cpm`) cohorts. Patients in the training and test cohorts have matched histologic STaN quantification and bulk RNA-seq data, whereas patients in the internal-unseen cohort have RNA-seq data only and are used for clinical validation of classifier predictions. Matrices are formatted with genes as rows and samples as columns. `stan_clinical` contains clinical metadata for all three cohorts, with one row per patient and `dataset` indicating "train", "test", or "unseen".
+
+```{r load-data}
+data(stan_clinical)
+data(train_log2cpm)
+data(test_log2cpm)
+data(unseen_log2cpm)
+
+train_clin <- stan_clinical %>% dplyr::filter(dataset == "train")
+test_clin <- stan_clinical %>% dplyr::filter(dataset == "test")
+
+dim(train_log2cpm)
+dim(test_log2cpm)
+dim(unseen_log2cpm)
+table(stan_clinical$dataset)
+```
+
+
+## 2. Reproduce the STaN classifier model
+
+### Top-variance gene selection
+
+To reduce the initial feature space, the top 1,000 genes with the highest expression variance across the training cohort are retained for model development. This filtering step is performed using the training cohort only and does not incorporate STaN class labels.
+
+```{r top-var-genes}
+gene_vars <- apply(train_log2cpm, 1, var, na.rm = TRUE)
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[seq_len(1000)]
+length(top_genes)
+```
+
+### Wrangle train and test data frames for modeling
+
+Expression and phenotype data are matched by `RNA-seq` sample identifier. STaN class is encoded as a factor with `"Low"` as the reference level, so coefficient signs correspond consistently to 
+STaN-high (+) versus STaN-low (-). Feature names are converted to syntactically valid R names for modeling.
+
+```{r assemble-data}
+# filter training data by top variable genes
+train_df <- as.data.frame(t(train_log2cpm[top_genes, , drop = FALSE]))
+train_df$`RNA-seq` <- rownames(train_df)
+
+train_data <- dplyr::inner_join(
+  train_clin %>% dplyr::select(`RNA-seq`, nerve_group), train_df, by = "RNA-seq")
+test_data <- test_clin %>% dplyr::select(`RNA-seq`, nerve_group)
+
+train_ids <- train_data$`RNA-seq`
+test_ids <- test_data$`RNA-seq`
+train_data$`RNA-seq` <- NULL
+test_data$`RNA-seq` <- NULL
+
+train_data$nerve_group <- stats::relevel(factor(make.names(train_data$nerve_group)), ref = "Low")
+test_data$nerve_group <- stats::relevel(factor(make.names(test_data$nerve_group)), ref = "Low")
+colnames(train_data) <- make.names(colnames(train_data))
+colnames(test_data) <- make.names(colnames(test_data))
+
+nrow(train_data)
+nrow(test_data)
+```
+
+### Bootstrap stability selection
+
+Before model tuning, bootstrap stability selection is used to identify features that are reproducibly selected across resampled training datasets. A fixed elastic-net model (`alpha = 0.5`) is first used to select a regularization parameter by 10-fold cross-validation. The model is then refit across 1,000 bootstrap resamples using this fixed alpha and lambda. Genes are retained for downstream modeling if they have a non-zero coefficient in at least 25% of bootstrap models and maintain the same coefficient direction in at least 75% of models in which they are selected.
+
+```{r stability-filter}
+set.seed(42) # for reproducibility
+
+x_mat <- as.matrix(train_data %>% dplyr::select(-nerve_group))
+y_vec <- train_data$nerve_group
+
+# select a fixed lambda for bootstrap stability selection at alpha = 0.5 
+nfolds <- 10
+foldid <- sample(rep(seq_len(nfolds), length.out = nrow(x_mat)))
+pre_cv <- glmnet::cv.glmnet(x_mat, y_vec, family = "binomial", alpha = 0.5, standardize = TRUE, nfolds = nfolds)
+stable_lambda <- pre_cv$lambda.1se # this is the fixed lambda used for bootstrapping
+
+# fit elastic-net models across 1,000 bootstrap resamples
+n_boot <- 1000
+pos_counts <- stats::setNames(numeric(ncol(x_mat)), colnames(x_mat))
+neg_counts <- pos_counts
+kept_genes <- vector("list", n_boot)
+
+for (b in seq_len(n_boot)) {
+  # create a bootstrap sample of the training data
+  boot_idx <- sample(seq_len(nrow(x_mat)), replace = TRUE)
+  
+  # fit a glmnet model on the bootstrap sample with the fixed alpha and lambda
+  boot_fit <- glmnet::glmnet(x_mat[boot_idx, , drop = FALSE], y_vec[boot_idx], family = "binomial", 
+                     alpha = 0.5, standardize = TRUE, lambda = stable_lambda)
+  coefs <- as.vector(stats::coef(boot_fit, s = stable_lambda))
+  names(coefs) <- rownames(stats::coef(boot_fit, s = stable_lambda))
+
+  # count the number of times each gene is non-zero and the sign of the coefficient
+  pos_vars <- dplyr::setdiff(names(coefs)[coefs > 0], "(Intercept)")
+  neg_vars <- dplyr::setdiff(names(coefs)[coefs < 0], "(Intercept)")
+  if (length(pos_vars) > 0) pos_counts[pos_vars] <- pos_counts[pos_vars] + 1
+  if (length(neg_vars) > 0) neg_counts[neg_vars] <- neg_counts[neg_vars] + 1
+  kept_genes[[b]] <- dplyr::setdiff(names(coefs)[coefs != 0], "(Intercept)")
+}
+
+# calculate inclusion frequency and sign consistency for each gene
+gene_freq <- table(unlist(kept_genes)) / n_boot
+total_nonzero <- pos_counts + neg_counts
+valid_idx <- which(total_nonzero > 0)
+sign_consistency <- stats::setNames(rep(0, length(total_nonzero)), names(total_nonzero))
+sign_consistency[valid_idx] <- pmax(pos_counts[valid_idx], neg_counts[valid_idx]) / total_nonzero[valid_idx]
+
+boot_summary <- data.frame(
+  Gene = names(total_nonzero[valid_idx]),
+  Inclusion_Freq = as.numeric(total_nonzero[valid_idx] / n_boot),
+  Sign_Consistency = round(sign_consistency[valid_idx] * 100, 2))
+
+# retain genes meeting both stability thresholds
+stable_genes <- dplyr::intersect(names(gene_freq)[gene_freq >= 0.25], 
+                                 names(sign_consistency)[sign_consistency >= 0.75])
+
+train_data <- train_data[, c("nerve_group", stable_genes)]
+length(stable_genes)
+```
+
+#### Top 50 stable features
+
+Bootstrap inclusion frequencies for the 50 most frequently selected features are shown below; the dashed line indicates the 25% minimum inclusion-frequency threshold.
+
+```{r stability-plot, fig.height = 8, , fig.align='center'}
+top50 <- boot_summary %>% dplyr::arrange(dplyr::desc(Inclusion_Freq)) %>% head(50)
+
+ggplot2::ggplot(top50, ggplot2::aes(x = Inclusion_Freq, y = stats::reorder(Gene, Inclusion_Freq))) +
+  ggplot2::geom_bar(stat = "identity", fill = "#1D3557", color = "white") +
+  ggplot2::geom_vline(xintercept = 0.25, color = "#e74c3c", linetype = "dashed") +
+  cowplot::theme_cowplot() +
+  ggplot2::labs(title = "Top 50 Stable Features",
+       subtitle = "Dashed red line indicates threshold cutoff for model inclusion",
+       x = "Bootstrap inclusion frequency", y = "Feature") +
+  ggplot2::theme(axis.text.y = ggplot2::element_text(size = 9))
+```
+
+### Alpha/lambda tuning sweep and final fit
+
+Elastic-net mixing parameter α was evaluated from 0 to 1 in increments of 0.1 using shared 10-fold cross-validation splits. For each α, the λ minimizing cross-validated deviance was recorded. We then selected the largest α whose minimum deviance was within one standard error of the overall best-performing model and refit the classifier on the full training cohort.
+
+```{r tuning-sweep, fig.height = 5,, fig.align='center'}
+x_tune <- as.matrix(train_data %>% dplyr::select(-nerve_group))
+y_tune <- train_data$nerve_group
+alpha_seq <- seq(0, 1, by = 0.1)
+
+# assign shared folds for comparison across alpha values
+foldid <- sample(rep(seq_len(nfolds), length.out = nrow(x_tune)))
+
+# evaluate cross-validated deviance across alpha
+sweep_fits <- vector("list", length(alpha_seq))
+sweep_results <- data.frame(alpha = alpha_seq, cvm_min = NA_real_, cvsd_min = NA_real_, lambda_min = NA_real_)
+
+for (i in seq_along(alpha_seq)) {
+  cv_fit <- glmnet::cv.glmnet(x_tune, y_tune, family = "binomial", alpha = alpha_seq[i], 
+                              standardize = TRUE, keep = TRUE, foldid = foldid)
+  idx_min <- which.min(cv_fit$cvm)
+  sweep_fits[[i]] <- cv_fit
+  sweep_results$cvm_min[i] <- cv_fit$cvm[idx_min]
+  sweep_results$cvsd_min[i] <- cv_fit$cvsd[idx_min]
+  sweep_results$lambda_min[i] <- cv_fit$lambda[idx_min]
+}
+sweep_results
+
+# apply the 1-SE selection rule across alpha
+global_idx <- which.min(sweep_results$cvm_min)
+threshold <- sweep_results$cvm_min[global_idx] + sweep_results$cvsd_min[global_idx]
+within_1se <- which(sweep_results$cvm_min <= threshold)
+best_i <- within_1se[which.max(sweep_results$alpha[within_1se])]
+
+# extract the selected alpha, lambda, and CV fit
+best_alpha <- sweep_results$alpha[best_i]
+best_lambda <- sweep_results$lambda_min[best_i]
+best_cv_fit <- sweep_fits[[best_i]]
+
+# extract out-of-fold training predictions at the selected alpha/lambda
+lambda_idx <- which.min(abs(best_cv_fit$lambda - best_lambda))
+oof_prob_high <- 1 / (1 + exp(-best_cv_fit$fit.preval[, lambda_idx]))
+cv_pred_class <- factor(ifelse(oof_prob_high > 0.5, "High", "Low"), levels = c("Low","High"))
+
+# fit the final model on the full training cohort
+model <- caret::train(
+  nerve_group ~ ., data = train_data, method = "glmnet",
+  trControl = caret::trainControl(
+    method = "none", classProbs = TRUE, summaryFunction = twoClassSummary),
+  tuneGrid = data.frame(alpha = best_alpha, lambda = best_lambda),
+  preProcess = c("center", "scale"), metric = "ROC"
+)
+
+fitted_coef <- stats::coef(model$finalModel, s = model$bestTune$lambda)
+final_coefs <- stats::setNames(as.vector(fitted_coef), rownames(fitted_coef))
+final_coefs <- final_coefs[dplyr::setdiff(names(final_coefs), "(Intercept)")]
+range(final_coefs)
+final_coefs
+
+# preview the model's best tuning parameters
+model$bestTune
+```
+
+#### Cross-validation error curve
+
+Out-of-fold predictions from the selected cross-validation fit are retained for visualization and internal assessment of training performance. Because bootstrap feature selection was performed using the full training cohort before cross-validation, these predictions represent an internal model-development estimate rather than an independent estimate of generalization performance.
+
+```{r}
+# plot cross validation error curve across lambda for the chosen alpha
+plot(best_cv_fit)
+graphics::title(paste("Cross-Validation Error Curve (Fixed alpha =", best_alpha, ")"), line = 3, font.main = 1)
+```
+
+#### Coefficient shrinkage path
+
+The coefficient shrinkage path shows how feature coefficients change with increasing regularization. Dashed vertical lines indicate `lambda.min` (left) and `lambda.1se` (right) for the selected alpha.
+
+```{r coef-path, fig.height = 4.75, fig.align='center'}
+# extract coefficient paths for features entering the model
+beta <- as.matrix(model$finalModel$beta)
+lambdas <- model$finalModel$lambda
+active_genes <- rownames(beta)[rowSums(beta != 0) > 0]
+beta_active <- beta[active_genes, , drop = FALSE]
+
+path_df <- expand.grid(Gene = active_genes, LambdaIndex = seq_along(lambdas))
+path_df$LogLambda <- log(lambdas[path_df$LambdaIndex])
+path_df$Estimate <- as.vector(beta_active)
+
+# extract y positions for gene labels
+path_label_coefs <- beta_active[, length(lambdas)]
+label_df <- data.frame(Gene = active_genes, LogLambda = min(path_df$LogLambda), Estimate = path_label_coefs[active_genes])
+yr <- range(path_df$Estimate, na.rm=TRUE)
+
+# plot the coefficient shrinkage path
+ggplot2::ggplot(path_df, ggplot2::aes(x = LogLambda, y = Estimate, group = Gene, color = Gene)) +
+  ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  ggplot2::geom_vline(xintercept = log(best_cv_fit$lambda.min),linetype = "dashed", color = "gray50") +
+  ggplot2::geom_vline(xintercept = log(best_cv_fit$lambda.1se),linetype = "dashed", color = "gray50") +
+  ggplot2::geom_line(linewidth = 0.5) +
+  ggrepel::geom_text_repel(
+    data = label_df, ggplot2::aes(label = Gene), hjust = 1, direction = "y", seed = 42, 
+    nudge_x = -0.2, size = 4, fontface = "bold", min.segment.length = Inf) +
+  ggthemes::scale_color_tableau(palette = "Classic 20") +
+  cowplot::theme_cowplot() +
+  ggplot2::theme(legend.position = "none", plot.title = ggplot2::element_text(face = "plain")) +
+  ggplot2::labs(title = "Elastic Net Coefficient Shrinkage Path", x = "Log(lambda)", y = "Coefficients") +
+  ggplot2::coord_cartesian(ylim=yr+diff(yr)*c(-.05,0), xlim = c(-10.5,0), clip = "off")
+```
+
+
+## 3. Predict STaN class in new data
+
+New samples are classified by aligning their gene expression values to the features expected by the fitted model. Missing model features, if any, are imputed using the corresponding gene's median log2-CPM expression in the training cohort before prediction. Expression matrices are expected with genes as rows and samples as columns.
+
+```{r pred-function}
+pred_nerve <- function(expr_mat, model, input_type = c("counts", "cpm", "log2cpm")) {
+  input_type <- match.arg(input_type)
+  if (ncol(expr_mat) == 0) {
+    return(data.frame(`RNA-seq` = character(0), Pred_Class = factor(character(0), levels = model$obsLevels), check.names = FALSE))
+  }
+
+  # convert to log2-CPM depending on how the input data is formatted
+  if (input_type == "counts") {
+    valid_genes <- dplyr::intersect(rownames(expr_mat), gene_anns$GENE_NAME[gene_anns$GENE_TYPE %in% c("protein_coding", "miRNA", "lncRNA")])
+    dge <- edgeR::DGEList(expr_mat[valid_genes, , drop = FALSE])
+    expr <- edgeR::cpm(dge, normalized.lib.sizes = FALSE, log = TRUE, prior.count = 1) # no TMM normalization to enable single-agent predictions
+  } else if (input_type == "cpm") {
+    expr <- log2(as.matrix(expr_mat) + 1)
+  } else {
+    expr <- as.matrix(expr_mat)
+  }
+
+  sample_ids <- colnames(expr)
+  rownames(expr) <- make.names(rownames(expr))
+  sig_genes <- model$coefnames
+
+  # impute missing model features using the gene's median expression from training data
+  missing_genes <- dplyr::setdiff(sig_genes, rownames(expr))
+  if (length(missing_genes) > 0) {
+    train_name_map <- stats::setNames(rownames(train_log2cpm), make.names(rownames(train_log2cpm)))
+    medians <- apply(train_log2cpm[train_name_map[missing_genes], , drop = FALSE], 1, median)
+    filler <- matrix(medians, nrow = length(missing_genes), ncol = ncol(expr), dimnames = list(missing_genes, colnames(expr)))
+    expr <- rbind(expr, filler)
+  }
+  expr <- expr[sig_genes, , drop = FALSE]
+
+  newdata <- as.data.frame(t(expr))
+  colnames(newdata) <- make.names(colnames(newdata))
+
+  # predict STaN class
+  data.frame(
+    `RNA-seq` = sample_ids,
+    Pred_Class = stats::predict(model, newdata, type = "raw"),
+    stats::predict(model, newdata, type = "prob"),
+    check.names = FALSE)
+}
+
+# make predictions on the test and unseen cohorts
+test_pred <- pred_nerve(test_log2cpm, model, input_type = "log2cpm")
+unseen_pred <- pred_nerve(unseen_log2cpm, model, input_type = "log2cpm")
+
+```
+
+
+## 4. Model performance
+
+Classifier performance is summarized using receiver operating characteristic (ROC) curves and confusion matrices. Training performance is shown using cross-validated out-of-fold (CV OOF) predictions generated during model development, whereas independent test performance is calculated from predictions generated by the final model. Performance in the independent test cohort therefore provides the primary estimate of model generalizability.
+
+### Overlayed ROC
+
+```{r roc-overlay, fig.height = 4, fig.width = 4.5, fig.align='center'}
+# compute roc
+train_roc <- pROC::roc(y_tune, oof_prob_high, levels = c("Low", "High"), direction = "<", quiet = TRUE)
+test_eval <- test_pred %>% 
+  dplyr::left_join(test_clin %>% dplyr::select(`RNA-seq`,nerve_group),by="RNA-seq")
+test_roc <- pROC::roc(test_eval$nerve_group,test_eval$High,levels=c("Low","High"),direction="<",quiet=TRUE)
+
+# extract performance metrics at the 0.5 threshold
+train_coords <- pROC::coords(train_roc, x = 0.5, input = "threshold", ret = c("sensitivity", "specificity", "accuracy"))[1, ]
+test_coords <- pROC::coords(test_roc, x = 0.5, input = "threshold", ret = c("sensitivity", "specificity", "accuracy"))[1, ]
+
+roc_df <- rbind(
+  data.frame(fpr = 1 - test_roc$specificities, tpr = test_roc$sensitivities, Cohort = "Independent (Test)"),
+  data.frame(fpr = 1 - train_roc$specificities, tpr = train_roc$sensitivities, Cohort = "CV OOF (Train)"))
+
+# plot overlayed ROC curves
+ggplot2::ggplot(roc_df, ggplot2::aes(x = fpr, y = tpr, color = Cohort)) +
+  ggplot2::geom_path(linewidth = 1.2) +
+  ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "solid", color = "gray") +
+  ggplot2::scale_color_discrete(palette = c("#1D3557","#00B8A9"), 
+                       labels = c(
+                         paste0("CV OOF (Train)\nAUC = ", round(pROC::auc(train_roc), digits = 2)),
+                         paste0("Independent (Test)\nAUC = ",round(pROC::auc(test_roc), digits = 2)))
+                       ) +
+  ggplot2::labs(title = "Model Predictive Performance", x = "1 - Specificity", y = "Sensitivity") +
+  cowplot::theme_cowplot() + 
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "plain"), 
+                 legend.title = ggplot2::element_blank(), 
+                 legend.key.spacing.y = grid::unit(0.5, "cm"), 
+                 legend.justification = c(0, 0), legend.position = "inside", 
+                 legend.position.inside = c(.55, 0.15), aspect.ratio = 1)
+
+```
+
+
+```{r}
+writeLines(sprintf(
+      "CV OOF (Train) - AUC: %.3f | Sensitivity: %.3f | Specificity: %.3f | Accuracy: %.3f\nIndependent (Test) - AUC: %.3f | Sensitivity: %.3f | Specificity: %.3f | Accuracy: %.3f",
+      pROC::auc(train_roc), train_coords[["sensitivity"]], train_coords[["specificity"]], train_coords[["accuracy"]],
+      pROC::auc(test_roc), test_coords[["sensitivity"]], test_coords[["specificity"]], test_coords[["accuracy"]]))
+
+```
+
+### Confusion matrices
+
+```{r confusion-matrices, fig.width = 8, fig.height = 4, fig.align='center'}
+# compute and plot confusion matrices
+confusion_plot <- function(actual, predicted, title) {
+  actual <- factor(actual, levels = levels(predicted))
+  cm <- caret::confusionMatrix(predicted, actual)
+  cm_df <- as.data.frame(cm$table)
+  cm_df$Prediction <- factor(cm_df$Prediction, levels = rev(levels(cm_df$Prediction)))
+  cm_df$Reference <- factor(cm_df$Reference, levels = rev(levels(cm_df$Reference)))
+
+  ggplot2::ggplot(cm_df, aes(Reference, Prediction, fill = Freq)) +
+    ggplot2::geom_tile(color = "white") +
+    ggplot2::geom_text(aes(label = Freq), vjust = 1, size = 6) +
+    ggplot2::scale_fill_gradient(low = "#ffffff", high = "#2c3e50") +
+    ggplot2::labs(title = title, x = "True Class", y = "Predicted Class") +
+    cowplot::theme_cowplot() +
+    ggplot2::theme(legend.position = "none", plot.title = ggplot2::element_text(face = "plain"))
+}
+
+cowplot::plot_grid(
+  confusion_plot(y_tune, cv_pred_class, "CV OOF (Train)"),
+  confusion_plot(test_eval$nerve_group,test_eval$Pred_Class,"Independent (Test)"),
+  nrow=1)
+
+```
+
+
+## 5. STaN signature genes
+
+### Heatmap
+
+Expression of the 12 genes with non-zero coefficients in the locked final model is shown across the training and independent test cohorts. Expression values are z-scored separately for each gene across patients and truncated to ±3 for visualization. Patients are ordered by histologically measured STaN abundance (`nerve_obj_area_percent`), and the fitted model coefficient for each signature gene is shown as a row annotation. Predicted classes and probabilities correspond to cross-validated out-of-fold predictions for training patients and locked-model predictions for independent test patients.
+
+```{r heatmap, fig.width = 10.5, fig.height = 6}
+name_map <- stats::setNames(rownames(train_log2cpm),make.names(rownames(train_log2cpm)))
+clin <- stan_clinical[match(c(train_ids,test_ids),stan_clinical$`RNA-seq`),]
+sig_genes_clean <- names(final_coefs)[final_coefs!=0]
+sig_genes_orig <- name_map[sig_genes_clean]
+
+x_mat <- cbind(train_log2cpm[sig_genes_orig,train_ids,drop=FALSE],
+               test_log2cpm[sig_genes_orig,test_ids,drop=FALSE])
+x_mat <- t(scale(t(x_mat))); x_mat[is.na(x_mat)] <- 0
+x_mat <- pmax(pmin(x_mat,3),-3)
+
+pred_class_all <- c(as.character(cv_pred_class),as.character(test_pred$Pred_Class))
+pred_prob_all <- c(oof_prob_high,test_pred$High)
+
+# prepare patient annotations
+top_df <- data.frame(
+  Cohort=factor(clin$Cohort),
+  Sex=factor(clin$Sex),
+  BCG_failure=factor(clin$BCG_failure,levels=c("No","Yes")),
+  Progression=factor(clin$Progression,levels=c(0,1),labels=c("No Progression","Progression")),
+  True_Class=factor(clin$nerve_group,levels=c("Low","High")),
+  Predicted_Class=factor(pred_class_all,levels=c("Low","High")),
+  Prediction_Prob_of_High=pred_prob_all)
+
+
+# define patient annotation colors
+top_cols <- list(
+  Cohort=c("A"="#1D3557","B"="#00A9A5"),
+  Sex=c("Female"="#A6BE54","Male"="#006400"),
+  `BCG Failure`=c("No"="gray","Yes"="black"),
+  Progression=c("No Progression"="gray","Progression"="black"),
+  `True Class`=c("Low"="#ffb347","High"="#E85D04"),
+  `Predicted Class`=c("Low"="#ffb347","High"="#E85D04"), #"#d94801"
+  `Prediction Prob`=colorRamp2::colorRamp2(c(0, 0.5, 1), hcl_palette = "SunsetDark", reverse = TRUE))
+
+
+# create top annotations
+top_ann <- ComplexHeatmap::HeatmapAnnotation(
+  Cohort=top_df$Cohort, Sex=top_df$Sex, 
+  `BCG Failure`=top_df$BCG_failure, Progression=top_df$Progression,
+  `True Class`=top_df$True_Class, `Predicted Class`=top_df$Predicted_Class,
+  `Prediction Prob`=top_df$Prediction_Prob_of_High,
+  `STaN+\nArea (%)`=ComplexHeatmap::anno_barplot(
+    clin$nerve_obj_area_percent,
+    border=FALSE,height=grid::unit(1.75,"cm"),bar_width=0.85,
+    gp=grid::gpar(fill="#fdb462",col=NA), axis=TRUE,
+    axis_param=list(side="left",at=c(0,0.5,1),
+                    labels=c("0.0","0.5","1.0"), 
+                    gp=grid::gpar(fontsize=9))),
+  col=top_cols, gap=grid::unit(0.5,"mm"),
+  simple_anno_size=grid::unit(4.5,"mm"),
+  annotation_name_side="left", annotation_name_rot=0, 
+  annotation_name_gp=grid::gpar(fontsize=10),
+  show_annotation_name=c(TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE),
+  show_legend=FALSE)
+
+
+# construct clinical annotation legends
+lgd_cohort <- ComplexHeatmap::Legend(title="Cohort",labels=c("Train","Test"),
+  legend_gp=grid::gpar(fill=c("#1D3557","#00A9A5")),
+  title_gp=grid::gpar(fontsize=10), labels_gp=grid::gpar(fontsize=9))
+lgd_sex <- ComplexHeatmap::Legend(title="Sex",labels=c("Female","Male"),
+  legend_gp=grid::gpar(fill=c("#A6BE54","#006400")),
+  title_gp=grid::gpar(fontsize=10), labels_gp=grid::gpar(fontsize=9))
+lgd_bcg <- ComplexHeatmap::Legend(title="BCG Failure",labels=c("No","Yes"),
+  legend_gp=grid::gpar(fill=c("gray","black")),
+  title_gp=grid::gpar(fontsize=10), labels_gp=grid::gpar(fontsize=9))
+lgd_prog <- ComplexHeatmap::Legend(title="Progression",labels=c("No Progression","Progression"),
+  legend_gp=grid::gpar(fill=c("gray","black")),
+  title_gp=grid::gpar(fontsize=10), labels_gp=grid::gpar(fontsize=9))
+lgd_true <- ComplexHeatmap::Legend(title="True Class",labels=c("STaN-low","STaN-high"),
+  legend_gp=grid::gpar(fill=c("#ffb347","#E85D04")),
+  title_gp=grid::gpar(fontsize=10), labels_gp=grid::gpar(fontsize=9))
+lgd_pred <- ComplexHeatmap::Legend(title="Predicted Class",labels=c("STaN-low","STaN-high"),
+  legend_gp=grid::gpar(fill=c("#ffb347","#E85D04")),
+  title_gp=grid::gpar(fontsize=10), labels_gp=grid::gpar(fontsize=9))
+lgd_prob <- ComplexHeatmap::Legend(title="Prediction Probability\nof STaN-high",
+  direction="horizontal", col_fun=top_cols$`Prediction Prob`,at=c(0,0.5,1),
+  title_gp=grid::gpar(fontsize=10), labels_gp=grid::gpar(fontsize=9),
+  legend_height=grid::unit(14,"mm"), legend_width=grid::unit(28,"mm"))
+
+clinical_row1 <- ComplexHeatmap::packLegend(
+  lgd_cohort, lgd_sex, lgd_bcg, lgd_prog, direction="horizontal", gap=grid::unit(7,"mm"))
+
+clinical_row2 <- ComplexHeatmap::packLegend(
+  lgd_true, lgd_pred, lgd_prob, direction="horizontal", gap=grid::unit(9,"mm"))
+
+clinical_lgds <- ComplexHeatmap::packLegend(
+  clinical_row1, clinical_row2, direction="vertical", gap=grid::unit(5,"mm"))
+
+# define gene expression and coefficient color scales
+coef_col <- circlize::colorRamp2(c(-0.5,0,0.5), c("#168FD0","#FAF7F2","#F04E63"))
+z_col <- colorRamp2::colorRamp2(c(-2.5,-1.25,0,1.25,2.5), hcl_palette = "Purple-Green", reverse = TRUE)
+
+# prepare feature coefficient row annotation
+gene_coefs <- final_coefs[sig_genes_clean]
+names(gene_coefs) <- sig_genes_orig
+
+row_ann <- ComplexHeatmap::rowAnnotation(
+  `Model Coef`=gene_coefs[rownames(x_mat)],
+  Gene=ComplexHeatmap::anno_text(
+    rownames(x_mat), just="right", location=grid::unit(1,"npc"),
+    width=grid::unit(18,"mm"), gp=grid::gpar(fontsize=10)),
+  col=list(`Model Coef`=coef_col),
+  simple_anno_size=grid::unit(2,"mm"),
+  gap=grid::unit(0.5,"mm"),
+  show_annotation_name=FALSE,
+  show_legend=FALSE)
+
+# construct gene expression and coefficient legends
+z_lgd <- ComplexHeatmap::Legend(
+  title="Gene Expression Z-Score", col_fun=z_col,
+  at=c(-2.5,-1.25,0,1.25,2.5),
+  direction="horizontal", title_position="topcenter",
+  legend_width=grid::unit(60,"mm"),
+  title_gp=grid::gpar(fontsize=10), labels_gp=grid::gpar(fontsize=9))
+
+coef_lgd <- ComplexHeatmap::Legend(
+  title="Feature Coef", col_fun=coef_col,at=c(-0.5,0,0.5),
+  direction="horizontal", title_position="topcenter",
+  legend_width=grid::unit(18,"mm"),
+  title_gp=grid::gpar(fontsize=10), labels_gp=grid::gpar(fontsize=9))
+
+# order patients by histologically measured STaN abundance
+col_order <- order(clin$nerve_obj_area_percent,na.last=TRUE)
+
+# construct heatmap with custom legend formatting
+ht <- ComplexHeatmap::Heatmap(
+  x_mat,name="Gene Expression Z-Score", col=z_col,
+  top_annotation=top_ann, left_annotation=row_ann,
+  cluster_columns=FALSE, column_order=col_order, cluster_rows=TRUE,
+  row_dend_width=grid::unit(7,"mm"),
+  show_column_names=FALSE, show_row_names=FALSE,
+  width=grid::unit(135,"mm"), height=grid::unit(64,"mm"),
+  rect_gp=grid::gpar(col=NA), border=TRUE,
+  show_heatmap_legend=FALSE)
+
+# custom legend formatting
+grid::pushViewport(grid::viewport(
+  x=grid::unit(0,"npc"), y=grid::unit(1,"npc"),
+  width=grid::unit(165,"mm"), height=grid::unit(145,"mm"),
+  just=c("left","top")
+))
+ht <- ComplexHeatmap::draw(
+  ht,
+  padding=grid::unit(c(15,2,2,2),"mm"),
+  newpage=FALSE
+)
+
+ComplexHeatmap::decorate_heatmap_body("Gene Expression Z-Score",{
+  grid::pushViewport(grid::viewport(
+    x=grid::unit(0.5,"npc"),
+    y=grid::unit(-4,"mm"),
+    width=grid::unit(70,"mm"),
+    height=grid::unit(10,"mm"),
+    just=c("center","top"),
+    clip="off"
+  ))
+  ComplexHeatmap::draw(
+    z_lgd,
+    x=grid::unit(0.5,"npc"),
+    y=grid::unit(1,"npc"),
+    just=c("center","top")
+  )
+  grid::popViewport()
+})
+
+ComplexHeatmap::decorate_annotation("Model Coef",{
+  grid::pushViewport(grid::viewport(
+    x=grid::unit(0.5,"npc")+grid::unit(9.25,"mm"),
+    y=grid::unit(-4,"mm"),
+    width=grid::unit(28,"mm"),
+    height=grid::unit(10,"mm"),
+    just=c("center","top"),
+    clip="off"
+  ))
+  ComplexHeatmap::draw(
+    coef_lgd,
+    x=grid::unit(0.5,"npc"),
+    y=grid::unit(1,"npc"),
+    just=c("center","top")
+  )
+  grid::popViewport()
+})
+
+grid::popViewport()
+
+grid::pushViewport(grid::viewport(
+  x=grid::unit(170,"mm"), y=grid::unit(1,"npc")-grid::unit(6,"mm"),
+  width=grid::unit(115,"mm"), height=grid::unit(40,"mm"),
+  just=c("left","top"), clip="off"
+))
+ComplexHeatmap::draw(
+  clinical_lgds,
+  x=grid::unit(0,"npc"),
+  y=grid::unit(1,"npc"),
+  just=c("left","top")
+)
+grid::popViewport()
+
+```
+
+### Boxplots
+
+Expression of each STaN signature gene is compared between histologically defined STaN-low and STaN-high tumors across the training and independent test cohorts. P-values are calculated using two-sided Wilcoxon rank-sum tests and are shown for descriptive comparison only; these tests are not used for model feature selection or fitting.
+
+```{r gene-boxplots, fig.width = 7, fig.height = 7}
+ordered_genes <- names(sort(final_coefs[sig_genes_clean], decreasing = TRUE))
+orig_genes <- name_map[ordered_genes]
+
+all_log2cpm <- cbind(train_log2cpm[orig_genes, train_ids, drop = FALSE], test_log2cpm[orig_genes, test_ids, drop = FALSE])
+box_df <- as.data.frame(all_log2cpm)
+box_df$Gene <- rownames(box_df)
+box_df <- tidyr::pivot_longer(box_df, cols = -Gene, names_to = "RNA-seq", values_to = "Expression")
+box_df <- dplyr::left_join(box_df, stan_clinical %>% dplyr::select(`RNA-seq`, nerve_group), by = "RNA-seq")
+box_df$Gene <- factor(box_df$Gene, levels = orig_genes)
+box_df$nerve_group <- factor(box_df$nerve_group, levels = c("Low", "High"))
+
+pval_df <- box_df %>%
+  dplyr::group_by(Gene) %>%
+  dplyr::summarize(p = stats::wilcox.test(Expression ~ nerve_group, exact = FALSE)$p.value) %>%
+  dplyr::mutate(label = paste0("p = ", formatC(p, format = "g", digits = 2)))
+
+# plot
+ggplot2::ggplot(box_df, ggplot2::aes(x = nerve_group, y = Expression, fill = nerve_group)) +
+  ggplot2::geom_boxplot(outlier.shape = NA, alpha = 0.7, show.legend = FALSE) +
+  ggplot2::geom_jitter(width = 0.2, alpha = 0.5, size = 0.8, color = "black") +
+  ggplot2::facet_wrap(~Gene, scales = "free_y", ncol = 4) +
+  ggplot2::scale_fill_manual(values = c("Low" = "#ffb347","High"="#E85D04")) +
+  ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.05, 0.12))) +
+  ggplot2::geom_text(data = pval_df, ggplot2::aes(x = 1.5, y = Inf, label = label), 
+            inherit.aes = FALSE, vjust = 1.4, size = 2.8) +
+  cowplot::theme_cowplot(font_size = 11) +
+  ggplot2::labs(x = "True STaN class", y = "log2(CPM + 1)") +
+  ggplot2::theme(strip.text = ggplot2::element_text(size = 9)) +
+  ggplot2::guides(fill = "none")
+
+```
+
+
+## 6. Patient predictions table
+
+For convenience, model predictions are combined with available clinical information for all training, test, and internal-unseen patients. Training patients are assigned their cross-validated out-of-fold predictions, whereas test and internal-unseen patients are assigned predictions from the locked final model. Histologically defined STaN class is available only for training and test patients; consequently, true class and prediction accuracy are undefined for the internal-unseen cohort.
+
+```{r predictions-table}
+# merge predictions with clinical data
+patient_predictions <- stan_clinical %>%
+  dplyr::select(`RNA-seq`, Cohort, dataset, nerve_group) %>%
+  dplyr::rename(true_class_nerve_group = nerve_group) %>%
+  dplyr::left_join(
+    dplyr::bind_rows(
+      data.frame(`RNA-seq` = train_ids, pred_class_nerve_group = as.character(cv_pred_class), 
+                 pred_probability_high = oof_prob_high, check.names = FALSE),
+      data.frame(`RNA-seq` = test_ids, pred_class_nerve_group = as.character(test_pred$Pred_Class), 
+                 pred_probability_high = test_pred$High, check.names = FALSE),
+      data.frame(`RNA-seq` = unseen_pred$`RNA-seq`, pred_class_nerve_group = 
+                   as.character(unseen_pred$Pred_Class), pred_probability_high = unseen_pred$High, 
+                 check.names = FALSE)), by = "RNA-seq") %>%
+  dplyr::mutate(pred_correct = true_class_nerve_group == pred_class_nerve_group, 
+                `Pred class` = ifelse(is.na(pred_class_nerve_group), NA, 
+                                      ifelse(pred_class_nerve_group== "High", "STaN-high","STaN-low")),
+                `Pred class` = factor(`Pred class`, levels = c("STaN-low", "STaN-high")))
+
+head(patient_predictions[patient_predictions$dataset == "unseen", ], 10)
+
+table(patient_predictions$dataset, patient_predictions$pred_class_nerve_group)
+```
+
+
+## 7. Prognostic relevance of predictions
+
+### Internal-unseen cohort
+
+The internal-unseen cohort comprises patients from RNA-seq cohorts A and B who lack histological nerve quantification and were therefore excluded from classifier development and performance evaluation. 
+
+These patients are classified as predicted STaN-high or STaN-low using the locked model, and predicted class is evaluated for association with high-grade recurrence-free and progression-free survival. Because histological STaN class is unavailable in this cohort, this analysis evaluates the clinical relevance of model predictions rather than classification accuracy.
+
+```{r unseen-km, warning=FALSE, message=FALSE, fig.width = 10, fig.height = 5}
+# merge predictions with clinical data
+unseen_surv <- dplyr::inner_join(unseen_pred, stan_clinical %>% dplyr::select(-dataset), by = "RNA-seq")
+nrow(unseen_surv) 
+
+# function to plot KM curves
+plot_km <- function(time, event, group, title, palette = c("orange","#E85D04")) {
+  df <- data.frame(Time = time, Event = event, Group = factor(group, levels = c("Low", "High")))
+  df <- df[!is.na(df$Time) & !is.na(df$Event) & !is.na(df$Group), ]
+
+  km_fit <- survival::survfit(survival::Surv(Time, Event) ~ Group, data = df)
+  print(km_fit)
+  
+  surv_diff <- survdiff(survival::Surv(Time, Event) ~ Group, data = df)
+  p_value <- 1 - pchisq(surv_diff$chisq, length(surv_diff$n) - 1)
+  print(p_value)
+  
+  survminer::ggsurvplot(
+    km_fit, data = df, title = title, pval = TRUE, conf.int = TRUE, palette = palette, 
+    break.x.by = 24, xlab = "Time (months)", xlim = c(0, 72),
+    risk.table = TRUE, risk.table.y.text = FALSE, risk.table.height = 0.25,
+    legend.labs = c("Predicted STaN-Low", "Predicted STaN-High"), 
+    legend.title = "", legend = "top")
+}
+
+# plot KM curves for high-grade recurrence and progression
+km_hg_recur <- plot_km(unseen_surv$Time_to_HG_recur_or_FUend, unseen_surv$HG_recur, 
+                       unseen_surv$Pred_Class, "High-Grade Recurrence-Free Survival")
+km_progression <- plot_km(unseen_surv$Time_to_prog_or_FUend, unseen_surv$Progression, 
+                          unseen_surv$Pred_Class, "Progression-Free Survival")
+survminer::arrange_ggsurvplots(list(km_hg_recur, km_progression), ncol = 2, nrow = 1, print = TRUE)
+
+```
+
+
+## 8. Predicting STaN class in independent datasets
+
+For convenient application, the locked STaN classifier model derived from the workflow above is implemented in `gotNeRve()`. The function performs any required gene alignment and preprocessing before applying the package's bundled 12-gene STaN signature model and returns predicted STaN class and class probabilities for each sample. 
+
+### Input data
+
+Raw counts, CPM-normalized expression, or log2-CPM expression can be supplied by specifying the corresponding `input_type`. Raw counts are recommended when available, as `gotNeRve()` performs gene filtering, CPM normalization, and log2 transformation internally using the same pre-processing parameters applied during model development. The input data should be formatted as a data frame or matrix with genes as rows and samples as columns.
+
+### Missing genes
+
+If one or more model genes are absent from the input matrix, `gotNeRve()` issues a warning and imputes their expression using the corresponding median value(s) from the training cohort. Because missing signature genes may reduce prediction reliability, predictions should be interpreted cautiously when imputation is required.
+
+```{r predict-nerve-demo, eval = FALSE}
+gotNeRve::gotNeRve(my_counts, input_type = "counts")   # raw counts 
+gotNeRve::gotNeRve(my_cpm, input_type = "cpm")         # already CPM-normalized
+gotNeRve::gotNeRve(my_log2cpm, input_type = "log2cpm") # already fully processed
+```
+
+
+

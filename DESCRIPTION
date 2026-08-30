@@ -1,0 +1,48 @@
+Package: gotNeRve
+Title: Predict Nerve Infiltration Status from RNA-seq Expression
+Version: 0.0.0.9000
+Authors@R:
+    person("Cailin", "Deiter", , "cailin.deiter@cuanschutz.edu", role = c("aut", "cre"))
+Description: Config-driven gene-signature pipeline for predicting nerve
+    infiltration status from RNA-seq expression: counts -> CPM -> gene
+    filtering -> elastic-net model training with a bootstrapped stability
+    filter. Includes gotNeRve() for scoring new counts, CPM, or
+    log2-CPM data against the bundled trained model.
+License: GPL (>= 3)
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Depends:
+    R (>= 4.1)
+Imports:
+    caret,
+    circlize,
+    ComplexHeatmap,
+    cowplot,
+    dplyr,
+    edgeR,
+    ggplot2,
+    ggpubr,
+    ggrepel,
+    glmnet,
+    grid,
+    pROC,
+    rlang,
+    stats,
+    tidyr,
+    utils
+Suggests:
+    testthat (>= 3.0.0),
+    usethis,
+    knitr,
+    rmarkdown,
+    ggthemes,
+    plotmo,
+    RColorBrewer,
+    colorRamp2,
+    survival,
+    survminer
+Config/testthat/edition: 3
+VignetteBuilder: knitr
+LazyData: true
+LazyDataCompression: xz
+Config/roxygen2/version: 8.1.0
