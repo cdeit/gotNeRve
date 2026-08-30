@@ -1,13 +1,14 @@
 Package: gotNeRve
-Title: Predict Nerve Infiltration Status from RNA-seq Expression
+Title: Predict Stromal Tumor-Associated Nerve (STaN) Abundance from Gene Expression
 Version: 0.0.0.9000
 Authors@R:
     person("Cailin", "Deiter", , "cailin.deiter@cuanschutz.edu", role = c("aut", "cre"))
-Description: Config-driven gene-signature pipeline for predicting nerve
-    infiltration status from RNA-seq expression: counts -> CPM -> gene
-    filtering -> elastic-net model training with a bootstrapped stability
-    filter. Includes gotNeRve() for scoring new counts, CPM, or
-    log2-CPM data against the bundled trained model.
+Description: Implements a gene expression-based classifier for predicting
+    high or low stromal tumor-associated nerve (STaN) abundance in
+    non-muscle-invasive bladder cancer. The bundled elastic-net model uses
+    a 12-gene transcriptomic signature developed from bulk RNA-sequencing
+    of tumors with matched image-based STaN quantification. Includes
+    gotNeRve() for scoring raw counts, CPM, or log2-CPM gene expression data.
 License: GPL (>= 3)
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
@@ -15,32 +16,32 @@ Depends:
     R (>= 4.1)
 Imports:
     caret,
-    circlize,
-    ComplexHeatmap,
-    cowplot,
     dplyr,
     edgeR,
-    ggplot2,
-    ggpubr,
-    ggrepel,
     glmnet,
-    grid,
-    pROC,
-    rlang,
     stats,
     tidyr,
     utils
 Suggests:
-    testthat (>= 3.0.0),
-    usethis,
-    knitr,
-    rmarkdown,
-    ggthemes,
-    plotmo,
-    RColorBrewer,
+    circlize,
     colorRamp2,
+    ComplexHeatmap,
+    cowplot,
+    ggplot2,
+    ggpubr,
+    ggthemes,
+    ggrepel,
+    grid,
+    knitr,
+    plotmo,
+    pROC,
+    rlang,
+    RColorBrewer,
+    rmarkdown,
     survival,
     survminer
+    testthat (>= 3.0.0),
+    usethis,
 Config/testthat/edition: 3
 VignetteBuilder: knitr
 LazyData: true
