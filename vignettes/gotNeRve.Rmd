@@ -13,7 +13,7 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 7, fig.height
 
 ## Introduction
 
-`gotNeRve` is a gene expression-based classifier for predicting high or low **s**tromal **t**umor-**a**ssociated **n**erve (**STaN**) abundance in non-muscle-invasive bladder cancer (NMIBC). The classifier uses a 12-gene transcriptomic signature and can be applied to individual samples or larger cohorts.
+`gotNeRve` is a gene expression-based elastic net classifier for predicting high or low **s**tromal **t**umor-**a**ssociated **n**erve (**STaN**) abundance in non-muscle-invasive bladder cancer (NMIBC). The classifier uses a 12-gene transcriptomic signature and can be applied to individual samples or larger cohorts.
 
 This R Markdown document reproduces the results from the original publication step-by-step, including the development and evaluation of the STaN classifier, feature selection, model tuning, and validation in an independent test cohort. It also demonstrates the prognostic relevance of model predictions in an internal-unseen cohort and provides examples for applying the trained `gotNeRve` model to new gene expression data.
 
