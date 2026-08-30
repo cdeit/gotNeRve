@@ -30,8 +30,9 @@
 #'   `test_cpm` (log2-CPM matrices restricted to the top-variance gene set,
 #'   original gene names), `pheno` (combined, filtered train+test phenotype
 #'   data), and `test_predictions` (the held-out cohort's predicted class/
-#'   probability, obtained via [gotNeRve()] on `b_counts` for full
-#'   consistency with how any other new cohort is scored).
+#'   probability, obtained via the same scoring logic [gotNeRve()] uses
+#'   internally, for full consistency with how any other new cohort is
+#'   scored).
 train_model <- function(pheno_data, a_counts, b_counts, gene_anns,
                         config = gotnerve_config()) {
   target <- config$target_var
@@ -225,7 +226,7 @@ train_model <- function(pheno_data, a_counts, b_counts, gene_anns,
     tuneGrid = best_tune, preProcess = config$ml_preproc, metric = "ROC"
   )
 
-  test_predictions <- gotNeRve(test_counts_raw, model = model_fit, input_type = "counts", gene_anns = gene_anns, gene_type_filter = config$gene_type_filter)
+  test_predictions <- score_nerve_class(test_counts_raw, model_fit, input_type = "counts", gene_anns = gene_anns, gene_type_filter = config$gene_type_filter)
   test_predictions <- test_predictions[match(test_ids, test_predictions$`RNA-seq`), ] # align rows to test_data/test_ids order
 
   structure(

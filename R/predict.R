@@ -40,25 +40,23 @@ impute_missing_genes <- function(expr, sig_genes, reference = NULL) {
   expr[sig_genes, , drop = FALSE]
 }
 
-#' Score new expression data against a trained gotNeRve model
+#' Score new expression data against a fitted model (internal)
 #'
-#' The single prediction entry point used for every cohort the package
-#' evaluates — the held-out test cohort, the internal-unseen cohorts, the
-#' external validation cohorts, and any user-supplied data — so a result is
-#' always produced "the same way." Aligns `new_data` to the model's
-#' signature genes (`model$coefnames`), imputing any that are missing with
-#' that gene's median log2-CPM value in the training cohort (see
-#' [impute_missing_genes()]), and returns the predicted class and
-#' probability.
+#' The shared scoring logic behind [gotNeRve()] and the package's own
+#' training pipeline (which scores the held-out test cohort against a
+#' freshly fit model, not the bundled one — see [train_model()]). Aligns
+#' `x` to the model's signature genes (`model$coefnames`), imputing any
+#' that are missing with that gene's median log2-CPM value in the training
+#' cohort (see [impute_missing_genes()]), and returns the predicted class
+#' and probability. Kept separate from [gotNeRve()] so that function can
+#' stay a plain "score against the bundled model" entry point with no
+#' `model` argument, while training/evaluation code can still score
+#' against an arbitrary in-progress model.
 #'
-#' @param new_data Genes (rows) x samples (cols) matrix or data frame.
-#' @param model A fitted `caret::train` model. Defaults to the package's own
-#'   bundled model (the one trained by [train_model()] under
-#'   [gotnerve_config()] defaults), so `gotNeRve(new_data)` works with no
-#'   further setup.
+#' @param x Genes (rows) x samples (cols) matrix or data frame.
+#' @param model A fitted `caret::train` model.
 #' @param input_type One of `"counts"`, `"cpm"`, or `"log2cpm"` — see
-#'   [process_gene_expression()]. Use `"log2cpm"` if `new_data` is already
-#'   fully processed and should be used as-is.
+#'   [process_gene_expression()].
 #' @param gene_anns Gene annotation data frame with `GENE_NAME`/`GENE_TYPE`.
 #'   Only used when `input_type = "counts"`; defaults to the package's
 #'   bundled `gene_anns`.
@@ -66,24 +64,22 @@ impute_missing_genes <- function(expr, sig_genes, reference = NULL) {
 #'   "counts"`.
 #'
 #' @return A data frame with one row per sample: `` `RNA-seq` `` (from
-#'   `colnames(new_data)`), `Pred_Class`, and one probability column per
-#'   outcome level.
-#' @export
-gotNeRve <- function(new_data,
-                      model = NULL,
-                      input_type = c("counts", "cpm", "log2cpm"),
-                      gene_anns = NULL,
-                      gene_type_filter = c("protein_coding", "miRNA", "lncRNA")) {
+#'   `colnames(x)`), `Pred_Class`, and one probability column per outcome
+#'   level (e.g. `High`, `Low`).
+#' @noRd
+score_nerve_class <- function(x, model,
+                               input_type = c("counts", "cpm", "log2cpm"),
+                               gene_anns = NULL,
+                               gene_type_filter = c("protein_coding", "miRNA", "lncRNA")) {
   input_type <- match.arg(input_type)
-  if (is.null(model)) model <- gotnerve_model
   if (is.null(gene_anns) && input_type == "counts") gene_anns <- gotNeRve::gene_anns
 
-  sample_ids <- colnames(new_data)
+  sample_ids <- colnames(x)
   if (length(sample_ids) == 0) {
     return(data.frame(`RNA-seq` = character(0), Pred_Class = factor(character(0), levels = model$obsLevels), check.names = FALSE))
   }
 
-  expr <- process_gene_expression(new_data, input_type, gene_anns, gene_type_filter)
+  expr <- process_gene_expression(x, input_type, gene_anns, gene_type_filter)
   rownames(expr) <- make.names(rownames(expr))
 
   sig_genes <- model$coefnames
@@ -99,4 +95,37 @@ gotNeRve <- function(new_data,
     data.frame(`RNA-seq` = sample_ids, Pred_Class = pred_class, check.names = FALSE),
     pred_prob
   )
+}
+
+#' Predict STaN class from gene expression using the bundled gotNeRve model
+#'
+#' The package's single prediction entry point for new data: loads the
+#' bundled, locked model automatically and scores `x` against it — no
+#' setup or configuration required. Aligns `x` to the model's signature
+#' genes, imputing any that are missing with that gene's median log2-CPM
+#' value in the training cohort (see [impute_missing_genes()]).
+#'
+#' @param x Genes (rows) x samples (cols) matrix or data frame.
+#' @param input_type One of `"counts"`, `"cpm"`, or `"log2cpm"` — see
+#'   [process_gene_expression()]. Use `"log2cpm"` if `x` is already
+#'   fully processed and should be used as-is.
+#'
+#' @return A data frame with one row per sample: `sample_id` (from
+#'   `colnames(x)`), `predicted_STaN_class`, and `probability_<level>` for
+#'   each outcome level (e.g. `probability_high`, `probability_low`).
+#' @export
+gotNeRve <- function(x, input_type = c("counts", "cpm", "log2cpm")) {
+  input_type <- match.arg(input_type)
+  result <- score_nerve_class(
+    x, gotnerve_model, input_type,
+    gene_anns = gotNeRve::gene_anns,
+    gene_type_filter = c("protein_coding", "miRNA", "lncRNA")
+  )
+
+  prob_cols <- setdiff(colnames(result), c("RNA-seq", "Pred_Class"))
+  colnames(result)[colnames(result) %in% prob_cols] <- paste0("probability_", tolower(prob_cols))
+
+  names(result)[names(result) == "RNA-seq"] <- "sample_id"
+  names(result)[names(result) == "Pred_Class"] <- "predicted_STaN_class"
+  result
 }

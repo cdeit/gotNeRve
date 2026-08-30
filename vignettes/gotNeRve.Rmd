@@ -304,7 +304,7 @@ New samples are classified by aligning their gene expression values to the featu
 pred_nerve <- function(expr_mat, model, input_type = c("counts", "cpm", "log2cpm")) {
   input_type <- match.arg(input_type)
   if (ncol(expr_mat) == 0) {
-    return(data.frame(`RNA-seq` = character(0), Pred_Class = factor(character(0), levels = model$obsLevels), check.names = FALSE))
+    return(data.frame(sample_id = character(0), predicted_STaN_class = factor(character(0), levels = model$obsLevels), check.names = FALSE))
   }
 
   # convert to log2-CPM depending on how the input data is formatted
@@ -336,10 +336,13 @@ pred_nerve <- function(expr_mat, model, input_type = c("counts", "cpm", "log2cpm
   colnames(newdata) <- make.names(colnames(newdata))
 
   # predict STaN class
+  pred_prob <- stats::predict(model, newdata, type = "prob")
+  colnames(pred_prob) <- paste0("probability_", tolower(colnames(pred_prob)))
+
   data.frame(
-    `RNA-seq` = sample_ids,
-    Pred_Class = stats::predict(model, newdata, type = "raw"),
-    stats::predict(model, newdata, type = "prob"),
+    sample_id = sample_ids,
+    predicted_STaN_class = stats::predict(model, newdata, type = "raw"),
+    pred_prob,
     check.names = FALSE)
 }
 
@@ -359,9 +362,9 @@ Classifier performance is summarized using receiver operating characteristic (RO
 ```{r roc-overlay, fig.height = 4, fig.width = 4.5, fig.align='center'}
 # compute roc
 train_roc <- pROC::roc(y_tune, oof_prob_high, levels = c("Low", "High"), direction = "<", quiet = TRUE)
-test_eval <- test_pred %>% 
-  dplyr::left_join(test_clin %>% dplyr::select(`RNA-seq`,nerve_group),by="RNA-seq")
-test_roc <- pROC::roc(test_eval$nerve_group,test_eval$High,levels=c("Low","High"),direction="<",quiet=TRUE)
+test_eval <- test_pred %>%
+  dplyr::left_join(test_clin %>% dplyr::select(`RNA-seq`,nerve_group),by=c("sample_id"="RNA-seq"))
+test_roc <- pROC::roc(test_eval$nerve_group,test_eval$probability_high,levels=c("Low","High"),direction="<",quiet=TRUE)
 
 # extract performance metrics at the 0.5 threshold
 train_coords <- pROC::coords(train_roc, x = 0.5, input = "threshold", ret = c("sensitivity", "specificity", "accuracy"))[1, ]
@@ -421,7 +424,7 @@ confusion_plot <- function(actual, predicted, title) {
 
 cowplot::plot_grid(
   confusion_plot(y_tune, cv_pred_class, "CV OOF (Train)"),
-  confusion_plot(test_eval$nerve_group,test_eval$Pred_Class,"Independent (Test)"),
+  confusion_plot(test_eval$nerve_group,test_eval$predicted_STaN_class,"Independent (Test)"),
   nrow=1)
 
 ```
@@ -444,8 +447,8 @@ x_mat <- cbind(train_log2cpm[sig_genes_orig,train_ids,drop=FALSE],
 x_mat <- t(scale(t(x_mat))); x_mat[is.na(x_mat)] <- 0
 x_mat <- pmax(pmin(x_mat,3),-3)
 
-pred_class_all <- c(as.character(cv_pred_class),as.character(test_pred$Pred_Class))
-pred_prob_all <- c(oof_prob_high,test_pred$High)
+pred_class_all <- c(as.character(cv_pred_class),as.character(test_pred$predicted_STaN_class))
+pred_prob_all <- c(oof_prob_high,test_pred$probability_high)
 
 # prepare patient annotations
 top_df <- data.frame(
@@ -684,12 +687,12 @@ patient_predictions <- stan_clinical %>%
   dplyr::rename(true_class_nerve_group = nerve_group) %>%
   dplyr::left_join(
     dplyr::bind_rows(
-      data.frame(`RNA-seq` = train_ids, pred_class_nerve_group = as.character(cv_pred_class), 
+      data.frame(`RNA-seq` = train_ids, pred_class_nerve_group = as.character(cv_pred_class),
                  pred_probability_high = oof_prob_high, check.names = FALSE),
-      data.frame(`RNA-seq` = test_ids, pred_class_nerve_group = as.character(test_pred$Pred_Class), 
-                 pred_probability_high = test_pred$High, check.names = FALSE),
-      data.frame(`RNA-seq` = unseen_pred$`RNA-seq`, pred_class_nerve_group = 
-                   as.character(unseen_pred$Pred_Class), pred_probability_high = unseen_pred$High, 
+      data.frame(`RNA-seq` = test_ids, pred_class_nerve_group = as.character(test_pred$predicted_STaN_class),
+                 pred_probability_high = test_pred$probability_high, check.names = FALSE),
+      data.frame(`RNA-seq` = unseen_pred$sample_id, pred_class_nerve_group =
+                   as.character(unseen_pred$predicted_STaN_class), pred_probability_high = unseen_pred$probability_high,
                  check.names = FALSE)), by = "RNA-seq") %>%
   dplyr::mutate(pred_correct = true_class_nerve_group == pred_class_nerve_group, 
                 `Pred class` = ifelse(is.na(pred_class_nerve_group), NA, 
@@ -712,7 +715,7 @@ These patients are classified as predicted STaN-high or STaN-low using the locke
 
 ```{r unseen-km, warning=FALSE, message=FALSE, fig.width = 10, fig.height = 5}
 # merge predictions with clinical data
-unseen_surv <- dplyr::inner_join(unseen_pred, stan_clinical %>% dplyr::select(-dataset), by = "RNA-seq")
+unseen_surv <- dplyr::inner_join(unseen_pred, stan_clinical %>% dplyr::select(-dataset), by = c("sample_id" = "RNA-seq"))
 nrow(unseen_surv) 
 
 # function to plot KM curves
@@ -736,10 +739,10 @@ plot_km <- function(time, event, group, title, palette = c("orange","#E85D04")) 
 }
 
 # plot KM curves for high-grade recurrence and progression
-km_hg_recur <- plot_km(unseen_surv$Time_to_HG_recur_or_FUend, unseen_surv$HG_recur, 
-                       unseen_surv$Pred_Class, "High-Grade Recurrence-Free Survival")
-km_progression <- plot_km(unseen_surv$Time_to_prog_or_FUend, unseen_surv$Progression, 
-                          unseen_surv$Pred_Class, "Progression-Free Survival")
+km_hg_recur <- plot_km(unseen_surv$Time_to_HG_recur_or_FUend, unseen_surv$HG_recur,
+                       unseen_surv$predicted_STaN_class, "High-Grade Recurrence-Free Survival")
+km_progression <- plot_km(unseen_surv$Time_to_prog_or_FUend, unseen_surv$Progression,
+                          unseen_surv$predicted_STaN_class, "Progression-Free Survival")
 survminer::arrange_ggsurvplots(list(km_hg_recur, km_progression), ncol = 2, nrow = 1, print = TRUE)
 
 ```

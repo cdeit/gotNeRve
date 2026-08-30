@@ -2,46 +2,26 @@
 % Please edit documentation in R/predict.R
 \name{gotNeRve}
 \alias{gotNeRve}
-\title{Score new expression data against a trained gotNeRve model}
+\title{Predict STaN class from gene expression using the bundled gotNeRve model}
 \usage{
-gotNeRve(
-  new_data,
-  model = NULL,
-  input_type = c("counts", "cpm", "log2cpm"),
-  gene_anns = NULL,
-  gene_type_filter = c("protein_coding", "miRNA", "lncRNA")
-)
+gotNeRve(x, input_type = c("counts", "cpm", "log2cpm"))
 }
 \arguments{
-\item{new_data}{Genes (rows) x samples (cols) matrix or data frame.}
-
-\item{model}{A fitted \code{caret::train} model. Defaults to the package's own
-bundled model (the one trained by \code{\link[=train_model]{train_model()}} under
-\code{\link[=gotnerve_config]{gotnerve_config()}} defaults), so \code{gotNeRve(new_data)} works with no
-further setup.}
+\item{x}{Genes (rows) x samples (cols) matrix or data frame.}
 
 \item{input_type}{One of \code{"counts"}, \code{"cpm"}, or \code{"log2cpm"} — see
-\code{\link[=process_gene_expression]{process_gene_expression()}}. Use \code{"log2cpm"} if \code{new_data} is already
+\code{\link[=process_gene_expression]{process_gene_expression()}}. Use \code{"log2cpm"} if \code{x} is already
 fully processed and should be used as-is.}
-
-\item{gene_anns}{Gene annotation data frame with \code{GENE_NAME}/\code{GENE_TYPE}.
-Only used when \code{input_type = "counts"}; defaults to the package's
-bundled \code{gene_anns}.}
-
-\item{gene_type_filter}{\code{GENE_TYPE} values to keep when \code{input_type = "counts"}.}
 }
 \value{
-A data frame with one row per sample: \code{`RNA-seq`} (from
-\code{colnames(new_data)}), \code{Pred_Class}, and one probability column per
-outcome level.
+A data frame with one row per sample: \code{sample_id} (from
+\code{colnames(x)}), \code{predicted_STaN_class}, and \verb{probability_<level>} for
+each outcome level (e.g. \code{probability_high}, \code{probability_low}).
 }
 \description{
-The single prediction entry point used for every cohort the package
-evaluates — the held-out test cohort, the internal-unseen cohorts, the
-external validation cohorts, and any user-supplied data — so a result is
-always produced "the same way." Aligns \code{new_data} to the model's
-signature genes (\code{model$coefnames}), imputing any that are missing with
-that gene's median log2-CPM value in the training cohort (see
-\code{\link[=impute_missing_genes]{impute_missing_genes()}}), and returns the predicted class and
-probability.
+The package's single prediction entry point for new data: loads the
+bundled, locked model automatically and scores \code{x} against it — no
+setup or configuration required. Aligns \code{x} to the model's signature
+genes, imputing any that are missing with that gene's median log2-CPM
+value in the training cohort (see \code{\link[=impute_missing_genes]{impute_missing_genes()}}).
 }

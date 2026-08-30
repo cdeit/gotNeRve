@@ -32,8 +32,9 @@ predictions/results used for train-side ROC and KM plots),
 \code{test_cpm} (log2-CPM matrices restricted to the top-variance gene set,
 original gene names), \code{pheno} (combined, filtered train+test phenotype
 data), and \code{test_predictions} (the held-out cohort's predicted class/
-probability, obtained via \code{\link[=gotNeRve]{gotNeRve()}} on \code{b_counts} for full
-consistency with how any other new cohort is scored).
+probability, obtained via the same scoring logic \code{\link[=gotNeRve]{gotNeRve()}} uses
+internally, for full consistency with how any other new cohort is
+scored).
 }
 \description{
 Cohort split -> gene-type filter + CPM (via \code{\link[=process_expression]{process_expression()}}) ->
