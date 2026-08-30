@@ -48,12 +48,15 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 
-# Raw source data used only to (re)build the bundled package data/model --
-# not meant to be published; keep locally, rebuild data/ and R/sysdata.rda
-# from these via the scripts in data-raw/ when needed.
+# Raw source data and build scripts used only to (re)build the bundled
+# package data/model -- not meant to be published (the raw data itself
+# isn't publicly available, so the scripts aren't independently
+# reproducible); keep locally, rebuild data/ and R/sysdata.rda from these
+# when needed.
 data-raw/*.RData
 data-raw/*.Rdata
 data-raw/*.rda
+data-raw/*.R
 
 # macOS / editor cruft
 .DS_Store
