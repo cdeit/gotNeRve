@@ -1,23 +1,60 @@
 # gotNeRve
 
-`gotNeRve` is an R package implementing a gene expression-based classifier for predicting high or low **s**tromal **t**umor-**a**ssociated **n**erve (**STaN**) abundance in non-muscle-invasive bladder cancer (NMIBC).
+`gotNeRve` is an R package implementing a gene expression-based classifier for predicting high or low ***s**tromal **t**umor-**a**ssociated **n**erve (**STaN**)* abundance in non-muscle-invasive bladder cancer (NMIBC).
 
-The classifier uses a 12-gene transcriptomic signature derived from bulk RNA-sequencing data and can be applied to individual samples or larger cohorts.
+The classifier is an elastic-net model developed from bulk RNA-sequencing of tumors with matched image-based STaN quantification. It uses a 12-gene transcriptomic signature to predict STaN-high vs STaN-low tumors and can be applied to individual samples or larger cohorts.
 
 ## Installation
 
 You can install the development version of `gotNeRve` from GitHub with:
 
-```r
+``` r
 # install.packages("devtools")
-devtools::install_github("YOURUSERNAME/gotNeRve")
+devtools::install_github("YOURUSERNAME/gotNeRve", dependencies=TRUE, build_vignettes=TRUE)
 ```
+
+## Dependencies
+
+`gotNeRve` requires `R` (\>= 4.1).
+
+Applying the classifier to new gene expression data with `gotNeRve()` requires:
+
+-   caret
+-   edgeR (Bioconductor)
+-   glmnet
+
+These dependencies are installed automatically with `devtools::install_github()` when `dependencies=TRUE`. If needed, they can be installed manually with:
+
+``` r
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("edgeR")
+install.packages(c("caret", "glmnet"))
+```
+
+Additional packages are used by the model-development, evaluation, and plotting code retained for reproducibility (see [Reproducing results from Deiter et al.]):
+
+-   circlize
+-   ComplexHeatmap (Bioconductor)
+-   cowplot
+-   dplyr
+-   ggplot2
+-   ggpubr
+-   ggrepel
+-   ggthemes
+-   pROC
+-   RColorBrewer
+-   rlang
+-   survival
+-   survminer
+-   tidyr
 
 ## Usage
 
 `gotNeRve()` accepts gene expression matrices with genes as rows and samples as columns. Raw counts, CPM-normalized expression, and log2-CPM expression are supported.
 
-```r
+``` r
 library(gotNeRve)
 
 # Raw counts
@@ -30,28 +67,43 @@ pred <- gotNeRve(my_cpm, input_type = "cpm")
 pred <- gotNeRve(my_log2cpm, input_type = "log2cpm")
 ```
 
-The function returns the predicted STaN class and class probabilities for each sample.
+The function returns the predicted STaN class (High vs Low) and class probabilities for each sample.
 
-Raw counts are recommended when available because `gotNeRve()` performs the preprocessing required by the classifier internally.
+Raw, unfiltered counts are recommended when available because `gotNeRve()` performs the pre-processing required by the classifier internally, using the same pre-processing applied during model development.
 
 ## Model
 
-The bundled classifier is a locked 12-gene elastic-net model developed in an NMIBC RNA-sequencing cohort and evaluated in an independent RNA-sequencing cohort with matched histologic STaN quantification.
+The bundled STaN abundance classifier is a locked 12-gene elastic-net model developed in an NMIBC RNA-sequencing cohort and evaluated in an independent RNA-sequencing cohort with matched histologic STaN quantification.
 
 The complete model-development and evaluation workflow is provided in the package vignette.
 
-## Citation
+## Citations
 
-If you use `gotNeRve` in your research, please cite the following publications:
+If you use `gotNeRve` or the associated data in your research, please cite the following publications:
 
-> Deiter CS, de Jong FC, Olislagers M, Jordan KR, Zuiverloon TCM, Costello JC.  
-> _Stromal innervation is prognostic in non-muscle-invasive bladder cancer and predicted by a distinct microenvironmental transcriptomic signature._  
-> bioRxiv. 2026. [Citation/DOI to be added]
+> Deiter CS, de Jong FC, Olislagers M, Jordan KR, Zuiverloon TCM, Costello JC. *Stromal innervation is prognostic in non-muscle-invasive bladder cancer and predicted by a distinct microenvironmental transcriptomic signature.* bioRxiv. 2026. [Citation/DOI to be added]
 
-> de Jong FC, Laajala TD, Hoedemaeker RF, Jordan KR, van der Made ACJ, Boevé ER, van der Schoot DKE, Nieuwkamer B, Janssen EAM, Mahmoudi T, Boormans JL, Theodorescu D, Costello JC, Zuiverloon TCM. 
-> _Non-muscle-invasive bladder cancer molecular subtypes predict differential response to intravesical Bacillus Calmette-Guérin._ Sci Transl Med. 2023 May 24;15(697):eabn4118. 
-> doi: [10.1126/scitranslmed.abn4118](https://doi.org/10.1126/scitranslmed.abn4118)
+> de Jong FC, Laajala TD, Hoedemaeker RF, Jordan KR, van der Made ACJ, Boevé ER, van der Schoot DKE, Nieuwkamer B, Janssen EAM, Mahmoudi T, Boormans JL, Theodorescu D, Costello JC, Zuiverloon TCM. *Non-muscle-invasive bladder cancer molecular subtypes predict differential response to intravesical Bacillus Calmette-Guérin.* Sci Transl Med. 2023 May 24;15(697):eabn4118. doi: [10.1126/scitranslmed.abn4118](https://doi.org/10.1126/scitranslmed.abn4118)
 
-## License
+## Reproducing results from Deiter et al.
 
-[Add license information]
+See the vignette `gotNeRve` listed for the package at `vignette(package="gotNeRve")` for training and validation of the STaN abundance classifier model. The raw contents of this vignette are located in the folder `/vignettes/gotNeRve.Rmd`, or for the compiled package inside `/doc/gotNeRve.html` (if compiled to HTML as expected by default).
+
+Gene count matrices for the RNA-sequencing data analyzed here were originally generated by de Jong et al. and are available through the Bioconductor [`BRSpred`](https://bioconductor.org/packages/BRSpred/) package. Please cite de Jong et al. when using these datasets (see [Citations]).
+
+`BRSpred` can be installed with:
+
+``` r
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("BRSpred")
+```
+
+## Acknowledgements
+
+The `gotNeRve` STaN abundance classifier was developed through a collaboration between University of Colorado Anschutz and the Erasmus MC Cancer Institute.
+
+## Contact
+
+For answers to technical questions regarding the model-development or implementation, feel free to email [cailin.deiter\@cuanschutz.edu](mailto:cailin.deiter@cuanschutz.edu){.email}.
