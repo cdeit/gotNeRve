@@ -44,7 +44,8 @@ filter_genes_by_type <- function(gene_names, gene_anns, gene_type_filter) {
 #' @return A genes x samples (log2) CPM matrix.
 process_expression <- function(counts_mat, pheno_sub, target_col = NULL, gene_anns,
                                gene_type_filter = c("protein_coding", "miRNA", "lncRNA"),
-                               min_count = 8, min_samples = 5,
+                               min_count = 8, # slightly lower than edgeR default of 10 to include potentially low expression axonal transcripts
+                               min_samples = 5,
                                apply_filter = TRUE, use_log2 = TRUE) {
   valid_genes <- filter_genes_by_type(rownames(counts_mat), gene_anns, gene_type_filter)
   common_pts <- intersect(pheno_sub$`RNA-seq`, colnames(counts_mat))
