@@ -3,9 +3,9 @@
 \docType{package}
 \name{gotNeRve-package}
 \alias{gotNeRve-package}
-\title{gotNeRve: Predict Nerve Infiltration Status from RNA-seq Expression}
+\title{gotNeRve: Predict Stromal Tumor-Associated Nerve (STaN) Abundance from Gene Expression}
 \description{
-Config-driven gene-signature pipeline for predicting nerve infiltration status from RNA-seq expression: counts -> CPM -> gene filtering -> elastic-net model training with a bootstrapped stability filter. Includes gotNeRve() for scoring new counts, CPM, or log2-CPM data against the bundled trained model.
+Implements a gene expression-based classifier for predicting high or low stromal tumor-associated nerve (STaN) abundance in non-muscle-invasive bladder cancer. The bundled elastic-net model uses a 12-gene transcriptomic signature developed from bulk RNA-sequencing of tumors with matched image-based STaN quantification. Includes gotNeRve() for scoring raw counts, CPM, or log2-CPM gene expression data.
 }
 \author{
 \strong{Maintainer}: Cailin Deiter \email{cailin.deiter@cuanschutz.edu}

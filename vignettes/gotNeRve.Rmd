@@ -756,15 +756,16 @@ For convenient application, the locked STaN classifier model derived from the wo
 
 Raw counts, CPM-normalized expression, or log2-CPM expression can be supplied by specifying the corresponding `input_type`. Raw counts are recommended when available, as `gotNeRve()` performs gene filtering, CPM normalization, and log2 transformation internally using the same pre-processing parameters applied during model development. The input data should be formatted as a data frame or matrix with genes as rows and samples as columns.
 
-### Missing genes
-
-If one or more model genes are absent from the input matrix, `gotNeRve()` issues a warning and imputes their expression using the corresponding median value(s) from the training cohort. Because missing signature genes may reduce prediction reliability, predictions should be interpreted cautiously when imputation is required.
-
+### Usage
 ```{r predict-nerve-demo, eval = FALSE}
 gotNeRve::gotNeRve(my_counts, input_type = "counts")   # raw counts 
 gotNeRve::gotNeRve(my_cpm, input_type = "cpm")         # already CPM-normalized
 gotNeRve::gotNeRve(my_log2cpm, input_type = "log2cpm") # already fully processed
 ```
+
+### Missing genes
+
+If one or more model genes are absent from the input matrix, `gotNeRve()` issues a warning and imputes their expression using the corresponding median value(s) from the training cohort. Because missing signature genes may reduce prediction reliability, predictions should be interpreted cautiously when imputation is required.
 
 
 

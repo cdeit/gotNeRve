@@ -19,6 +19,7 @@ Imports:
     dplyr,
     edgeR,
     glmnet,
+    rlang,
     stats,
     tidyr,
     utils
@@ -35,13 +36,12 @@ Suggests:
     knitr,
     plotmo,
     pROC,
-    rlang,
     RColorBrewer,
     rmarkdown,
     survival,
-    survminer
+    survminer,
     testthat (>= 3.0.0),
-    usethis,
+    usethis
 Config/testthat/edition: 3
 VignetteBuilder: knitr
 LazyData: true

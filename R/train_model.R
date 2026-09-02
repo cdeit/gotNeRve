@@ -3,9 +3,7 @@
 #' Cohort split -> gene-type filter + CPM (via [process_expression()]) ->
 #' top-variance gene selection -> bootstrapped feature-stability filter ->
 #' alpha/lambda tuning sweep -> final fixed-tune refit. Only the elastic-net
-#' classifier path is implemented (no random forest/XGBoost/SVM alternatives,
-#' no TMM/TPM normalization, and no class-imbalance weighting — none of those
-#' apply under the pipeline's own defaults).
+#' classifier path is implemented.
 #'
 #' @section RNG fidelity:
 #' To reproduce the exact default model, the
